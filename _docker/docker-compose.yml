@@ -1,0 +1,44 @@
+name: compose-now-gateway
+
+services:
+  gateway:
+    build:
+      context: .
+      target: dev
+    image: compose-now-gateway:dev
+    restart: always
+    networks:
+      - radx
+    env_file:
+      - ../.env
+    environment:
+      DOTNET_USE_POLLING_FILE_WATCHER: ${DOTNET_USE_POLLING_FILE_WATCHER}
+      DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER: ${DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER}
+      ASPNETCORE_ENVIRONMENT: ${APP_MODE}
+      DOTNET_WATCH_RESTART_ON_RUDE_EDIT: "true"
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY}
+      REDIS_HOST: gateway-redis
+    ports:
+      - "${ASPNETCORE_PORT}:5001"
+    volumes:
+      - ../container/obj:/app/obj
+      - ../container/bin:/app/bin
+      - ../app:/app
+
+  gateway-redis:
+    restart: always
+    image: redis:8.6.1
+    volumes:
+      - ../redis:/data
+    networks:
+      - radx
+    expose:
+      - 6379
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+
+networks:
+  radx:
+    name: radx
+    external: true
