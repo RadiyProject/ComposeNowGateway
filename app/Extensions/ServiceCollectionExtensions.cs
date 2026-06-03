@@ -2,6 +2,7 @@ using System.Text;
 using ComposeNowGateway.Models;
 using ComposeNowGateway.Services.Auth;
 using ComposeNowGateway.Services.Favorites;
+using ComposeNowGateway.Services.Plugins;
 using ComposeNowGateway.Services.Presets;
 using ComposeNowGateway.Services.Proxy;
 using ComposeNowGateway.Services.Sessions;
@@ -26,6 +27,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IGatewayTokenValidator, GatewayTokenValidator>();
         services.AddScoped<IGatewaySessionStore, RedisGatewaySessionStore>();
         services.AddScoped<IWebSocketProxyService, WebSocketProxyService>();
+        services.AddSingleton<IPluginNodeAllocator, RedisPluginNodeAllocator>();
 
         services.AddSingleton<IConnectionMultiplexer>(_ =>
         {

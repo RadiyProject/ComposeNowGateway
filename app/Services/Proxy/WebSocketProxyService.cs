@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using ComposeNowGateway.Models;
 using ComposeNowGateway.Services.Auth;
+using ComposeNowGateway.Services.Plugins;
 using ComposeNowGateway.Services.Sessions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
@@ -12,6 +13,7 @@ namespace ComposeNowGateway.Services.Proxy;
 public sealed class WebSocketProxyService(
     IGatewayTokenValidator tokenValidator,
     IGatewaySessionStore sessionStore,
+    IPluginNodeAllocator pluginNodeAllocator,
     IOptions<GatewayOptions> options,
     ILogger<WebSocketProxyService> logger
 ) : IWebSocketProxyService
@@ -20,6 +22,7 @@ public sealed class WebSocketProxyService(
 
     private readonly IGatewayTokenValidator _tokenValidator = tokenValidator;
     private readonly IGatewaySessionStore _sessionStore = sessionStore;
+    private readonly IPluginNodeAllocator _pluginNodeAllocator = pluginNodeAllocator;
     private readonly GatewayOptions _options = options.Value;
     private readonly ILogger<WebSocketProxyService> _logger = logger;
 
@@ -47,13 +50,32 @@ public sealed class WebSocketProxyService(
             return;
         }
 
-        string targetUrl = BuildTargetUrl(context);
+        string? targetUrl = await BuildTargetUrlAsync(context, cancellationToken);
+        if (targetUrl is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            await context.Response.WriteAsync(
+                "No plugin node is currently available. Please reconnect.",
+                cancellationToken
+            );
+            return;
+        }
+
         var session = await _sessionStore.UpsertAsync(auth.User, targetUrl, cancellationToken);
 
-        using WebSocket clientSocket = await context.WebSockets.AcceptWebSocketAsync();
         using var nodeSocket = new ClientWebSocket();
+        try
+        {
+            await nodeSocket.ConnectAsync(new Uri(targetUrl), cancellationToken);
+        }
+        catch
+        {
+            await _sessionStore.DeleteAsync(session.Id, CancellationToken.None);
+            throw;
+        }
 
-        await nodeSocket.ConnectAsync(new Uri(targetUrl), cancellationToken);
+        using WebSocket clientSocket = await context.WebSockets.AcceptWebSocketAsync();
+
         _logger.LogInformation(
             "Gateway session opened. SessionId={SessionId}, Target={Target}",
             session.Id,
@@ -91,9 +113,32 @@ public sealed class WebSocketProxyService(
             : null;
     }
 
-    private string BuildTargetUrl(HttpContext context)
+    private async Task<string?> BuildTargetUrlAsync(
+        HttpContext context,
+        CancellationToken cancellationToken
+    )
     {
-        var builder = new UriBuilder(_options.PluginsWebSocketUrl);
+        string pluginName = context.Request.Query["plugin"].ToString();
+        string sessionId = context.Request.Query["sessionId"].ToString();
+
+        PluginNodeLease? lease = null;
+        if (!string.IsNullOrWhiteSpace(pluginName))
+        {
+            lease = await _pluginNodeAllocator.AllocateAsync(
+                pluginName,
+                string.IsNullOrWhiteSpace(sessionId)
+                    ? Guid.NewGuid().ToString("N")
+                    : sessionId,
+                cancellationToken
+            );
+
+            if (lease is null)
+            {
+                return null;
+            }
+        }
+
+        var builder = new UriBuilder(lease?.WebSocketUrl ?? _options.PluginsWebSocketUrl);
         var query = new List<string>();
 
         foreach (var item in context.Request.Query)
@@ -104,6 +149,12 @@ public sealed class WebSocketProxyService(
             }
 
             AddQuery(query, item.Key, item.Value);
+        }
+
+        if (lease is not null)
+        {
+            AddQuery(query, "leaseId", lease.LeaseId);
+            AddQuery(query, "nodeId", lease.NodeId);
         }
 
         builder.Query = string.Join("&", query);
@@ -124,6 +175,11 @@ public sealed class WebSocketProxyService(
                 $"{Uri.EscapeDataString(key)}={Uri.EscapeDataString(value ?? string.Empty)}"
             );
         }
+    }
+
+    private static void AddQuery(List<string> query, string key, string value)
+    {
+        query.Add($"{Uri.EscapeDataString(key)}={Uri.EscapeDataString(value)}");
     }
 
     private static async Task SendAuthTokensAsync(
