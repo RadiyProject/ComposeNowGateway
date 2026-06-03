@@ -1,6 +1,7 @@
 using System.Text;
 using ComposeNowGateway.Models;
 using ComposeNowGateway.Services.Auth;
+using ComposeNowGateway.Services.Favorites;
 using ComposeNowGateway.Services.Proxy;
 using ComposeNowGateway.Services.Sessions;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -19,6 +20,7 @@ public static class ServiceCollectionExtensions
         services.Configure<GatewayOptions>(configuration.GetSection("Gateway"));
         services.AddControllers();
         services.AddHttpClient<ISiteAuthClient, SiteAuthClient>();
+        services.AddHttpClient<ISiteFavoriteGroupsClient, SiteFavoriteGroupsClient>();
         services.AddScoped<IGatewayTokenValidator, GatewayTokenValidator>();
         services.AddScoped<IGatewaySessionStore, RedisGatewaySessionStore>();
         services.AddScoped<IWebSocketProxyService, WebSocketProxyService>();
