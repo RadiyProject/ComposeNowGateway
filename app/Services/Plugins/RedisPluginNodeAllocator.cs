@@ -18,12 +18,7 @@ public sealed class RedisPluginNodeAllocator(
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
     private static readonly double BusyThresholdPercent = ReadBusyThreshold();
 
-    private readonly IConnectionMultiplexer _redis = ConnectionMultiplexer.Connect(new ConfigurationOptions
-    {
-        EndPoints = { $"{Environment.GetEnvironmentVariable("PLUGINS_REDIS_HOST") ?? "redis"}:6379" },
-        Password = Environment.GetEnvironmentVariable("REDIS_PASSWORD"),
-        AbortOnConnectFail = false
-    });
+    private readonly IConnectionMultiplexer _redis = ConnectionMultiplexer.Connect(BuildRedisOptions());
 
     private readonly ILogger<RedisPluginNodeAllocator> _logger = logger;
 
@@ -35,45 +30,74 @@ public sealed class RedisPluginNodeAllocator(
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        IDatabase database = _redis.GetDatabase();
-        TimeSpan waitTimeout = ReadWaitTimeout();
-        var deadline = DateTimeOffset.UtcNow.Add(waitTimeout);
-        bool pendingTaskPublished = false;
-
-        while (true)
+        try
         {
-            PluginNodeSnapshot? node = await FindNodeAsync(
-                database,
-                pluginName,
-                cancellationToken
-            );
+            IDatabase database = _redis.GetDatabase();
+            TimeSpan waitTimeout = ReadWaitTimeout();
+            var deadline = DateTimeOffset.UtcNow.Add(waitTimeout);
+            bool pendingTaskPublished = false;
 
-            if (node is not null)
+            while (true)
             {
-                return await CreateLeaseAsync(
-                    database,
-                    node,
-                    pluginName
-                );
-            }
-
-            if (!pendingTaskPublished)
-            {
-                await PublishPendingTaskAsync(
+                PluginNodeSnapshot? node = await FindNodeAsync(
                     database,
                     pluginName,
-                    sessionId
+                    cancellationToken
                 );
-                pendingTaskPublished = true;
-            }
 
-            if (DateTimeOffset.UtcNow >= deadline)
-            {
-                return null;
-            }
+                if (node is not null)
+                {
+                    return await CreateLeaseAsync(
+                        database,
+                        node,
+                        pluginName
+                    );
+                }
 
-            await Task.Delay(PollInterval, cancellationToken);
+                if (!pendingTaskPublished)
+                {
+                    await PublishPendingTaskAsync(
+                        database,
+                        pluginName,
+                        sessionId
+                    );
+                    pendingTaskPublished = true;
+                }
+
+                if (DateTimeOffset.UtcNow >= deadline)
+                {
+                    return null;
+                }
+
+                await Task.Delay(PollInterval, cancellationToken);
+            }
         }
+        catch (RedisException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Plugin node allocation failed because plugins Redis is unavailable. PluginName={PluginName}",
+                pluginName
+            );
+
+            return null;
+        }
+    }
+
+    private static ConfigurationOptions BuildRedisOptions()
+    {
+        int timeoutMs = ReadPositiveInt("PLUGINS_REDIS_TIMEOUT_MS", 15000);
+
+        return new ConfigurationOptions
+        {
+            EndPoints = { $"{Environment.GetEnvironmentVariable("PLUGINS_REDIS_HOST") ?? "redis"}:6379" },
+            Password = Environment.GetEnvironmentVariable("REDIS_PASSWORD"),
+            AbortOnConnectFail = false,
+            ConnectRetry = 3,
+            ConnectTimeout = timeoutMs,
+            AsyncTimeout = timeoutMs,
+            SyncTimeout = timeoutMs
+        };
     }
 
     private async Task<PluginNodeLease?> CreateLeaseAsync(
@@ -130,6 +154,14 @@ public sealed class RedisPluginNodeAllocator(
         return double.TryParse(raw, out double value) && value > 0
             ? value
             : 90;
+    }
+
+    private static int ReadPositiveInt(string key, int fallback)
+    {
+        string? raw = Environment.GetEnvironmentVariable(key);
+        return int.TryParse(raw, out int value) && value > 0
+            ? value
+            : fallback;
     }
 
     private static async Task<PluginNodeSnapshot?> FindNodeAsync(
